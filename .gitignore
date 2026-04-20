@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+mlflow/artifacts/
+airflow/data/raw/
+airflow/data/processed/
+*.csv
+*.pkl
+*.pt
+*.bin

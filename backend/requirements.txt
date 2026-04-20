@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+scikit-learn
+transformers
+torch
+mlflow
+dvc
+apache-airflow
+prometheus-fastapi-instrumentator
+pandas
+numpy
+pytest
+python-multipart
+pydantic
