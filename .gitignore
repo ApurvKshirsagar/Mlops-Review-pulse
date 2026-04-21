@@ -1,11 +1,27 @@
+# Python
 venv/
 __pycache__/
 *.pyc
 .env
-mlflow/artifacts/
+
+# Airflow runtime
+airflow/logs/
+airflow/*.db
+airflow/airflow.cfg
+
+# Data
 airflow/data/raw/
 airflow/data/processed/
+
+# Generic artifacts
 *.csv
-*.pkl
-*.pt
-*.bin
+*.json
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
