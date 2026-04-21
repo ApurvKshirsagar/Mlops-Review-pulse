@@ -9,13 +9,13 @@ airflow/logs/
 airflow/*.db
 airflow/airflow.cfg
 
-# Data
-airflow/data/raw/
+# Data files (managed by DVC - ignore actual data, not .dvc pointer files)
+airflow/data/raw/sentiment labelled sentences/
 airflow/data/processed/
+!airflow/data/**/*.dvc
+!airflow/data/.gitignore
 
-# Generic artifacts
-*.csv
-*.json
+# Generic artifacts outside of data folder
 *.zip
 
 # OS files
