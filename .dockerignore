@@ -1,0 +1,12 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+.env
+airflow/logs/
+airflow/*.db
+airflow/airflow.cfg
+mlflow/artifacts/models/distilbert/
+notebooks/
+*.zip
+.dvc/tmp/
