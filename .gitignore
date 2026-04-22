@@ -15,9 +15,13 @@ airflow/data/processed/
 !airflow/data/**/*.dvc
 !airflow/data/.gitignore
 
+# MLflow generated files
+mlflow/artifacts/
+mlflow/*.db
+
 # Generic artifacts outside of data folder
 *.zip
-
+    
 # OS files
 .DS_Store
 Thumbs.db

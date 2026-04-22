@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Review Pulse — Sentiment Intelligence</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    /* ── Nav ── */
+    nav {
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3748;
+      padding: 0 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+    }
+    .nav-brand { font-size: 1.3rem; font-weight: 700; color: #7c3aed; }
+    .nav-brand span { color: #e2e8f0; }
+    .nav-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ── Layout ── */
+    .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 2rem; border-bottom: 1px solid #2d3748; }
+    .tab {
+      padding: 0.75rem 1.5rem;
+      border: none;
+      background: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 0.95rem;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: all 0.2s;
+    }
+    .tab:hover { color: #e2e8f0; }
+    .tab.active { color: #7c3aed; border-bottom-color: #7c3aed; font-weight: 600; }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ── Cards ── */
+    .card {
+      background: #1a1d2e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; color: #c4b5fd; }
+
+    /* ── Input area ── */
+    textarea {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 1rem;
+      font-size: 0.95rem;
+      resize: vertical;
+      min-height: 100px;
+      font-family: inherit;
+    }
+    textarea:focus { outline: none; border-color: #7c3aed; }
+
+    /* ── Buttons ── */
+    .btn {
+      padding: 0.65rem 1.5rem;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: #7c3aed; color: white; }
+    .btn-primary:hover { background: #6d28d9; }
+    .btn-primary:disabled { background: #4c1d95; opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary { background: #2d3748; color: #e2e8f0; }
+    .btn-secondary:hover { background: #374151; }
+
+    /* ── Result badge ── */
+    .badge {
+      display: inline-block;
+      padding: 0.3rem 1rem;
+      border-radius: 20px;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .badge-Positive  { background: #14532d; color: #4ade80; }
+    .badge-Negative  { background: #450a0a; color: #f87171; }
+    .badge-Neutral   { background: #1e3a5f; color: #60a5fa; }
+
+    /* ── Single result ── */
+    .result-box {
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 1.2rem;
+      margin-top: 1rem;
+    }
+    .result-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .confidence-bar-wrap { flex: 1; min-width: 150px; }
+    .confidence-label { font-size: 0.8rem; color: #94a3b8; margin-bottom: 4px; }
+    .confidence-bar {
+      height: 8px; background: #2d3748; border-radius: 4px; overflow: hidden;
+    }
+    .confidence-fill {
+      height: 100%; border-radius: 4px;
+      background: linear-gradient(90deg, #7c3aed, #a78bfa);
+      transition: width 0.5s ease;
+    }
+
+    /* ── Table ── */
+    .results-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .results-table th {
+      text-align: left; padding: 0.75rem 1rem;
+      background: #0f1117; color: #94a3b8;
+      border-bottom: 1px solid #2d3748;
+    }
+    .results-table td {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid #1e2535;
+      vertical-align: top;
+    }
+    .results-table tr:hover td { background: #1e2535; }
+    .review-cell { max-width: 400px; }
+
+    /* ── Upload zone ── */
+    .upload-zone {
+      border: 2px dashed #2d3748;
+      border-radius: 12px;
+      padding: 3rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: #7c3aed;
+      background: rgba(124,58,237,0.05);
+    }
+    .upload-icon { font-size: 3rem; margin-bottom: 1rem; }
+    .upload-zone p { color: #94a3b8; margin-bottom: 0.5rem; }
+
+    /* ── Stats grid ── */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+    .stat-card {
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 1.2rem;
+      text-align: center;
+    }
+    .stat-value { font-size: 1.8rem; font-weight: 700; color: #a78bfa; }
+    .stat-label { font-size: 0.8rem; color: #94a3b8; margin-top: 0.3rem; }
+
+    /* ── Charts ── */
+    .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } }
+    .chart-wrap { position: relative; height: 280px; }
+
+    /* ── Loading ── */
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .empty-state { text-align: center; padding: 3rem; color: #4a5568; }
+    .empty-state .icon { font-size: 3rem; margin-bottom: 1rem; }
+
+    /* ── Pipeline ── */
+    .pipeline { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+    .pipe-step {
+      background: #1e2535;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      padding: 0.8rem 1.2rem;
+      font-size: 0.85rem;
+      text-align: center;
+      min-width: 120px;
+    }
+    .pipe-step .icon { font-size: 1.5rem; display: block; margin-bottom: 0.3rem; }
+    .pipe-step .name { color: #a78bfa; font-weight: 600; }
+    .pipe-step .tool { color: #64748b; font-size: 0.75rem; }
+    .pipe-arrow { color: #4a5568; font-size: 1.5rem; padding: 0 0.5rem; }
+
+    .error-msg { color: #f87171; background: #450a0a; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-brand">Review<span>Pulse</span> 🔮</div>
+  <div class="nav-status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</nav>
+
+<div class="container">
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('single')">Single Review</button>
+    <button class="tab" onclick="switchTab('batch')">Bulk CSV Upload</button>
+    <button class="tab" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab" onclick="switchTab('pipeline')">ML Pipeline</button>
+  </div>
+
+  <!-- ── Tab 1: Single Review ── -->
+  <div id="tab-single" class="tab-content active">
+    <div class="card">
+      <h2>🔍 Analyze a Review</h2>
+      <textarea id="singleInput" placeholder="Type or paste a customer review here...
+e.g. 'The product quality exceeded my expectations!'"></textarea>
+      <div style="margin-top:1rem; display:flex; gap:0.75rem; align-items:center;">
+        <button class="btn btn-primary" id="singleBtn" onclick="analyzeSingle()">
+          Analyze Sentiment
+        </button>
+        <button class="btn btn-secondary" onclick="document.getElementById('singleInput').value=''; document.getElementById('singleResult').innerHTML=''">
+          Clear
+        </button>
+      </div>
+      <div id="singleResult"></div>
+    </div>
+  </div>
+
+  <!-- ── Tab 2: CSV Upload ── -->
+  <div id="tab-batch" class="tab-content">
+    <div class="card">
+      <h2>📂 Bulk CSV Analysis</h2>
+      <p style="color:#94a3b8; font-size:0.9rem; margin-bottom:1rem;">
+        Upload a CSV file with a <code style="color:#a78bfa">review</code> column. Max 1000 rows.
+      </p>
+      <div class="upload-zone" id="uploadZone"
+           onclick="document.getElementById('fileInput').click()"
+           ondragover="event.preventDefault(); this.classList.add('dragover')"
+           ondragleave="this.classList.remove('dragover')"
+           ondrop="handleDrop(event)">
+        <div class="upload-icon">📊</div>
+        <p><strong>Click to upload</strong> or drag & drop</p>
+        <p style="font-size:0.8rem;">CSV files only</p>
+        <p id="fileName" style="color:#7c3aed; margin-top:0.5rem; font-weight:600;"></p>
+      </div>
+      <input type="file" id="fileInput" accept=".csv" style="display:none" onchange="handleFileSelect(this)"/>
+
+      <div style="margin-top:1rem; display:flex; gap:0.75rem;">
+        <button class="btn btn-primary" id="uploadBtn" onclick="uploadCSV()" disabled>
+          Analyze CSV
+        </button>
+        <button class="btn btn-secondary" onclick="clearCSV()">Clear</button>
+      </div>
+
+      <div id="uploadProgress" style="margin-top:1rem;"></div>
+    </div>
+
+    <div class="card" id="batchResultCard" style="display:none;">
+      <h2>📋 Results</h2>
+      <div id="batchSummary" style="margin-bottom:1rem;"></div>
+      <div style="overflow-x:auto;">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Review</th>
+              <th>Sentiment</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="batchTableBody"></tbody>
+        </table>
+      </div>
+      <div style="margin-top:1rem;">
+        <button class="btn btn-secondary" onclick="downloadResults()">⬇ Download Results CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab 3: Dashboard ── -->
+  <div id="tab-dashboard" class="tab-content">
+    <div id="dashboardEmpty" class="empty-state">
+      <div class="icon">📈</div>
+      <p>Upload a CSV or analyze reviews to see the dashboard</p>
+    </div>
+    <div id="dashboardContent" style="display:none;">
+      <div class="stats-grid" id="statsGrid"></div>
+      <div class="charts-grid" style="margin-top:1.5rem;">
+        <div class="card">
+          <h2>Sentiment Distribution</h2>
+          <div class="chart-wrap"><canvas id="pieChart"></canvas></div>
+        </div>
+        <div class="card">
+          <h2>Confidence Distribution</h2>
+          <div class="chart-wrap"><canvas id="barChart"></canvas></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:0;">
+        <h2>Top Keywords by Sentiment</h2>
+        <div id="keywordsPanel" style="display:flex; gap:2rem; flex-wrap:wrap;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab 4: Pipeline ── -->
+  <div id="tab-pipeline" class="tab-content">
+    <div class="card">
+      <h2>🔧 ML Pipeline Architecture</h2>
+      <div class="pipeline" style="margin:1.5rem 0; flex-wrap:wrap; gap:0.5rem;">
+        <div class="pipe-step"><span class="icon">📥</span><span class="name">Ingest</span><span class="tool">Airflow DAG</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step"><span class="icon">🧹</span><span class="name">Clean</span><span class="tool">Pandas</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step"><span class="icon">✅</span><span class="name">Validate</span><span class="tool">Assertions</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step"><span class="icon">📊</span><span class="name">Baseline Stats</span><span class="tool">DVC</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step"><span class="icon">🧠</span><span class="name">Train</span><span class="tool">MLflow</span></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step"><span class="icon">🚀</span><span class="name">Serve</span><span class="tool">FastAPI</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📡 API Endpoints</h2>
+      <table class="results-table">
+        <thead><tr><th>Method</th><th>Endpoint</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge badge-Positive" style="font-size:0.75rem;">GET</span></td><td><code>/api/v1/health</code></td><td>Health check</td></tr>
+          <tr><td><span class="badge badge-Positive" style="font-size:0.75rem;">GET</span></td><td><code>/api/v1/ready</code></td><td>Readiness probe</td></tr>
+          <tr><td><span class="badge badge-Neutral" style="font-size:0.75rem;">POST</span></td><td><code>/api/v1/predict</code></td><td>Single review prediction</td></tr>
+          <tr><td><span class="badge badge-Neutral" style="font-size:0.75rem;">POST</span></td><td><code>/api/v1/predict-batch</code></td><td>Batch predictions</td></tr>
+          <tr><td><span class="badge badge-Neutral" style="font-size:0.75rem;">POST</span></td><td><code>/api/v1/predict-csv</code></td><td>CSV file upload</td></tr>
+          <tr><td><span class="badge badge-Positive" style="font-size:0.75rem;">GET</span></td><td><code>/api/v1/stats</code></td><td>Dataset baseline stats</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>🛠 Technology Stack</h2>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">Airflow</div><div class="stat-label">Data Pipeline</div></div>
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">DVC</div><div class="stat-label">Data Versioning</div></div>
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">MLflow</div><div class="stat-label">Experiment Tracking</div></div>
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">FastAPI</div><div class="stat-label">Model Serving</div></div>
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">Docker</div><div class="stat-label">Containerization</div></div>
+        <div class="stat-card"><div class="stat-value" style="font-size:1.1rem;">Prometheus</div><div class="stat-label">Monitoring</div></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const API = 'http://localhost:8000/api/v1';
+  let allResults = [];
+  let pieChartInst = null, barChartInst = null;
+
+  // ── Health check ──
+  async function checkHealth() {
+    try {
+      const r = await fetch(`${API}/health`);
+      const d = await r.json();
+      document.getElementById('statusDot').style.background = d.model_loaded ? '#22c55e' : '#f59e0b';
+      document.getElementById('statusText').textContent = d.model_loaded ? 'Model Ready' : 'Model Loading...';
+    } catch {
+      document.getElementById('statusDot').style.background = '#ef4444';
+      document.getElementById('statusText').textContent = 'API Offline';
+    }
+  }
+  checkHealth();
+  setInterval(checkHealth, 30000);
+
+  // ── Tab switching ──
+  function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(`tab-${name}`).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  // ── Single prediction ──
+  async function analyzeSingle() {
+    const review = document.getElementById('singleInput').value.trim();
+    if (!review) return;
+    const btn = document.getElementById('singleBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Analyzing...';
+
+    try {
+      const r = await fetch(`${API}/predict`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({review}),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const d = await r.json();
+
+      const pct = Math.round(d.confidence * 100);
+      document.getElementById('singleResult').innerHTML = `
+        <div class="result-box">
+          <div class="result-row">
+            <span class="badge badge-${d.sentiment}">${d.sentiment}</span>
+            <div class="confidence-bar-wrap">
+              <div class="confidence-label">Confidence: ${pct}%</div>
+              <div class="confidence-bar">
+                <div class="confidence-fill" style="width:${pct}%"></div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:1rem; display:flex; gap:1rem; flex-wrap:wrap;">
+            ${Object.entries(d.probabilities).map(([k,v]) =>
+              `<div style="font-size:0.85rem; color:#94a3b8;">
+                <span class="badge badge-${k}" style="font-size:0.75rem;">${k}</span>
+                ${Math.round(v*100)}%
+              </div>`
+            ).join('')}
+          </div>
+        </div>`;
+    } catch(e) {
+      document.getElementById('singleResult').innerHTML = `<div class="error-msg">Error: ${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Analyze Sentiment';
+    }
+  }
+
+  // Allow Enter key in textarea
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('singleInput')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.ctrlKey) analyzeSingle();
+    });
+  });
+
+  // ── CSV Upload ──
+  let selectedFile = null;
+
+  function handleFileSelect(input) {
+    selectedFile = input.files[0];
+    if (selectedFile) {
+      document.getElementById('fileName').textContent = `✓ ${selectedFile.name}`;
+      document.getElementById('uploadBtn').disabled = false;
+    }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    document.getElementById('uploadZone').classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.csv')) {
+      selectedFile = file;
+      document.getElementById('fileName').textContent = `✓ ${file.name}`;
+      document.getElementById('uploadBtn').disabled = false;
+    }
+  }
+
+  function clearCSV() {
+    selectedFile = null;
+    document.getElementById('fileName').textContent = '';
+    document.getElementById('fileInput').value = '';
+    document.getElementById('uploadBtn').disabled = true;
+    document.getElementById('uploadProgress').innerHTML = '';
+    document.getElementById('batchResultCard').style.display = 'none';
+    allResults = [];
+  }
+
+  async function uploadCSV() {
+    if (!selectedFile) return;
+    const btn = document.getElementById('uploadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Processing...';
+    document.getElementById('uploadProgress').innerHTML = '<p style="color:#94a3b8">Uploading and analyzing...</p>';
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    try {
+      const r = await fetch(`${API}/predict-csv`, {method:'POST', body: formData});
+      if (!r.ok) throw new Error(await r.text());
+      const d = await r.json();
+      allResults = d.predictions;
+      renderBatchResults(d);
+      renderDashboard(d.predictions);
+      document.getElementById('uploadProgress').innerHTML = '';
+    } catch(e) {
+      document.getElementById('uploadProgress').innerHTML = `<div class="error-msg">Error: ${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Analyze CSV';
+    }
+  }
+
+  function renderBatchResults(d) {
+    const counts = {Positive:0, Negative:0, Neutral:0};
+    d.predictions.forEach(p => counts[p.sentiment] = (counts[p.sentiment]||0)+1);
+
+    document.getElementById('batchSummary').innerHTML = `
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value">${d.total}</div><div class="stat-label">Total Reviews</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:#4ade80">${counts.Positive||0}</div><div class="stat-label">Positive</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:#f87171">${counts.Negative||0}</div><div class="stat-label">Negative</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:#60a5fa">${counts.Neutral||0}</div><div class="stat-label">Neutral</div></div>
+      </div>`;
+
+    const tbody = document.getElementById('batchTableBody');
+    tbody.innerHTML = d.predictions.slice(0, 200).map((p,i) => `
+      <tr>
+        <td style="color:#4a5568">${i+1}</td>
+        <td class="review-cell">${p.review.substring(0,120)}${p.review.length>120?'...':''}</td>
+        <td><span class="badge badge-${p.sentiment}">${p.sentiment}</span></td>
+        <td>${Math.round(p.confidence*100)}%</td>
+      </tr>`).join('');
+
+    document.getElementById('batchResultCard').style.display = 'block';
+  }
+
+  function renderDashboard(predictions) {
+    document.getElementById('dashboardEmpty').style.display = 'none';
+    document.getElementById('dashboardContent').style.display = 'block';
+
+    const counts = {};
+    const confBuckets = {'0-60':0,'60-70':0,'70-80':0,'80-90':0,'90-100':0};
+    predictions.forEach(p => {
+      counts[p.sentiment] = (counts[p.sentiment]||0)+1;
+      const c = p.confidence*100;
+      if(c<60) confBuckets['0-60']++;
+      else if(c<70) confBuckets['60-70']++;
+      else if(c<80) confBuckets['70-80']++;
+      else if(c<90) confBuckets['80-90']++;
+      else confBuckets['90-100']++;
+    });
+
+    const avg = predictions.reduce((s,p)=>s+p.confidence,0)/predictions.length;
+    document.getElementById('statsGrid').innerHTML = `
+      <div class="stat-card"><div class="stat-value">${predictions.length}</div><div class="stat-label">Reviews Analyzed</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:#4ade80">${((counts.Positive||0)/predictions.length*100).toFixed(1)}%</div><div class="stat-label">Positive Rate</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:#f87171">${((counts.Negative||0)/predictions.length*100).toFixed(1)}%</div><div class="stat-label">Negative Rate</div></div>
+      <div class="stat-card"><div class="stat-value">${(avg*100).toFixed(1)}%</div><div class="stat-label">Avg Confidence</div></div>`;
+
+    // Pie chart
+    if(pieChartInst) pieChartInst.destroy();
+    pieChartInst = new Chart(document.getElementById('pieChart'), {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(counts),
+        datasets:[{
+          data: Object.values(counts),
+          backgroundColor: ['#4ade80','#f87171','#60a5fa'],
+          borderColor: '#1a1d2e', borderWidth: 3,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#e2e8f0' } } }
+      }
+    });
+
+    // Bar chart
+    if(barChartInst) barChartInst.destroy();
+    barChartInst = new Chart(document.getElementById('barChart'), {
+      type: 'bar',
+      data: {
+        labels: Object.keys(confBuckets),
+        datasets:[{
+          label: 'Reviews',
+          data: Object.values(confBuckets),
+          backgroundColor: '#7c3aed88',
+          borderColor: '#7c3aed', borderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+          x: { ticks:{color:'#94a3b8'}, grid:{color:'#1e2535'} },
+          y: { ticks:{color:'#94a3b8'}, grid:{color:'#1e2535'} }
+        },
+        plugins: { legend: { labels: { color: '#e2e8f0' } } }
+      }
+    });
+
+    // Keywords (simple word frequency)
+    const wordFreq = {Positive:{}, Negative:{}};
+    const stopwords = new Set(['the','a','an','is','it','this','was','i','to','and','of','in','for','my','that','with','but','not','on','at','be','have','had','has','were','are','very','so','as','me','we','they','their','its','all','been','would','could','did','do','just','no','he','she','if','from','or','by','get','got','more','out','up','our','your','his','her']);
+
+    predictions.filter(p=>p.sentiment!=='Neutral').forEach(p => {
+      const words = p.review.toLowerCase().split(/\W+/).filter(w=>w.length>3&&!stopwords.has(w));
+      words.forEach(w => {
+        wordFreq[p.sentiment][w] = (wordFreq[p.sentiment][w]||0)+1;
+      });
+    });
+
+    ['Positive','Negative'].forEach(sent => {
+      const top = Object.entries(wordFreq[sent]).sort((a,b)=>b[1]-a[1]).slice(0,10);
+      const color = sent==='Positive'?'#4ade80':'#f87171';
+      const bg = sent==='Positive'?'#14532d':'#450a0a';
+    });
+
+    document.getElementById('keywordsPanel').innerHTML = ['Positive','Negative'].map(sent => {
+      const top = Object.entries(wordFreq[sent]||{}).sort((a,b)=>b[1]-a[1]).slice(0,10);
+      return `<div>
+        <h3 style="font-size:0.9rem; margin-bottom:0.75rem; color:${sent==='Positive'?'#4ade80':'#f87171'}">${sent} Keywords</h3>
+        <div style="display:flex; flex-wrap:wrap; gap:0.5rem;">
+          ${top.map(([w,c])=>`<span style="background:#1e2535;padding:0.3rem 0.7rem;border-radius:20px;font-size:0.82rem;color:#94a3b8">${w} <strong style="color:#a78bfa">${c}</strong></span>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── Download CSV ──
+  function downloadResults() {
+    if (!allResults.length) return;
+    const csv = ['review,sentiment,confidence',
+      ...allResults.map(r => `"${r.review.replace(/"/g,'""')}",${r.sentiment},${r.confidence}`)
+    ].join('\n');
+    const blob = new Blob([csv], {type:'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sentiment_results.csv';
+    a.click();
+  }
+</script>
+</body>
+</html>
