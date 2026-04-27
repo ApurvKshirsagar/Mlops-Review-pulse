@@ -15,5 +15,5 @@ torchvision
 dvc
 apache-airflow
 pytest
-
-
+python-dotenv          # reads .env for local dev; no-op in Docker
+scipy                  # used by drift detection (KL-divergence)

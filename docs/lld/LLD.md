@@ -105,28 +105,51 @@ http_request_duration_seconds_bucket{le="0.005",handler="/api/v1/predict"} 1750.
 
 ### backend/app/core/config.py
 ```
-Settings
+Settings (all values loaded from environment variables via python-dotenv)
   MLFLOW_URI: str       = env MLFLOW_URI        (default: http://mlflow:5000)
   MODEL_NAME: str       = env MODEL_NAME         (default: sentiment-tfidf-lr)
   MODEL_STAGE: str      = env MODEL_STAGE        (default: Production)
   PROCESSED_DIR: str    = env PROCESSED_DIR      (default: /opt/airflow/data/processed)
+  LOG_DIR: str          = env LOG_DIR            (default: /opt/logs)
   APP_VERSION: str      = "1.0.0"
   APP_NAME: str         = "Review Pulse API"
+  DRIFT_THRESHOLD: float = env DRIFT_THRESHOLD   (default: 0.1)
+  RETRAIN_ON_DRIFT: bool = env RETRAIN_ON_DRIFT  (default: true)
+```
+
+### backend/app/core/logging_config.py
+```
+get_logger(name: str) -> logging.Logger
+  Configures a named logger with two handlers (added once only):
+    - StreamHandler (INFO+) → stdout, captured by Docker
+    - RotatingFileHandler (DEBUG+) → LOG_DIR/app.log, 10MB max, 5 backups
+  LOG_DIR is a host-mounted volume — logs are never stored inside the image.
 ```
 
 ### backend/app/core/model_loader.py
 ```
-_model = None   (module-level cache)
+_model = None   (module-level singleton cache)
 
 load_model() -> sklearn.Pipeline
-  1. If _model is cached, return it
-  2. Try: mlflow.sklearn.load_model("models:/MODEL_NAME/MODEL_STAGE")
-  3. If MLflow fails: fallback to local pickle at mlflow/artifacts/models/tfidf_lr_pipeline.pkl
+  1. If _model is cached, return immediately
+  2. Try MLflow registry (MLflow v3 compatible):
+       client = MlflowClient(tracking_uri=MLFLOW_URI)
+       versions = client.get_latest_versions(MODEL_NAME)
+       model_uri = f"models:/{MODEL_NAME}/{versions[-1].version}"
+       _model = mlflow.sklearn.load_model(model_uri)
+  3. If MLflow fails: fallback to local pickle at MODEL_DIR/tfidf_lr_pipeline.pkl
   4. Cache result in _model
-  5. Raise RuntimeError if both fail
+  5. Raise RuntimeError if both strategies fail
+
+  Note: MLflow v3 removed named stages (Production/Staging).
+  Models are now loaded by version number. get_latest_versions() returns
+  all versions sorted ascending; [-1] gives the most recently registered.
 
 get_model() -> sklearn.Pipeline
   Calls load_model(), returns cached model
+
+reload_model() -> sklearn.Pipeline
+  Clears _model cache and calls load_model() — used after training
 ```
 
 ### backend/app/services/predictor.py
@@ -144,6 +167,37 @@ predict_single(review: str) -> dict
 
 predict_batch(reviews: list[str]) -> list[dict]
   return [predict_single(r) for r in reviews]
+```
+
+### backend/app/services/train.py
+```
+Key functions:
+
+load_data() -> pd.DataFrame
+  Reads PROCESSED_DIR/cleaned.csv, drops null/invalid rows
+
+train_tfidf_lr(df) -> (run_id, metrics)
+  Trains TF-IDF (10k features, bigrams) + LogisticRegression pipeline
+  Logs params, metrics, classification report to MLflow
+  Saves local pickle to MODEL_DIR/tfidf_lr_pipeline.pkl
+  Calls _log_training_event() to append JSON line to LOG_DIR/training.log
+
+train_distilbert(df) -> (run_id, metrics) | (None, None)
+  Fine-tunes distilbert-base-uncased for binary classification
+  Skips gracefully if torch/transformers not installed
+
+compare_and_register_best(lr_metrics, bert_metrics, ...) -> str
+  Compares F1-macro scores, promotes winner to MLflow registry
+  Sets model alias "production" via client.set_registered_model_alias()
+  Calls _create_git_tag() to create annotated git tag
+
+_log_training_event(model, run_id, metrics)
+  Appends one JSON line to LOG_DIR/training.log:
+  {"timestamp", "model", "run_id", "accuracy", "f1_macro", ...}
+
+_create_git_tag(model, version, metrics)
+  Runs: git tag -a model/<name>/v<version> -m "..."
+  Non-fatal — logs warning if git unavailable
 ```
 
 ### backend/app/api/routes.py
@@ -189,7 +243,19 @@ Task 4: compute_baseline_stats
   Output: /opt/airflow/data/processed/baseline_stats.json
   Stats:  mean/std/min/max review length, label distribution, timestamp
 
-Dependencies: task1 >> task2 >> task3 >> task4
+Task 5: detect_drift
+  Input:  cleaned.csv + baseline_stats.json
+  Method: KL-divergence on review word-count histograms (20 bins, 0-100 words)
+  XCom:   pushes drift_detected (bool) and kl_divergence (float)
+  Logs:   KL value and whether threshold was exceeded
+
+Task 6: trigger_retraining
+  Input:  drift_detected XCom from task 5
+  Action: If drift_detected=True AND RETRAIN_ON_DRIFT=true,
+          POSTs to Airflow REST API to trigger model_training_pipeline DAG
+  Skip:   If no drift, or RETRAIN_ON_DRIFT=false (logs warning only)
+
+Dependencies: t1 >> t2 >> t3 >> t4 >> t5 >> t6
 ```
 
 ---
@@ -257,11 +323,13 @@ DAG: ingest → clean → validate
 | Service | Image | Port | Purpose |
 |---|---|---|---|
 | postgres | postgres:13 | 5432 | Airflow metadata DB |
-| airflow-init | apache/airflow:2.9.1 | — | DB migration + admin user |
-| airflow-scheduler | apache/airflow:2.9.1 | — | DAG scheduling |
+| airflow-init | apache/airflow:2.9.1 | — | One-time: DB migration + admin user creation |
+| airflow-scheduler | apache/airflow:2.9.1 | — | DAG scheduling and task execution |
 | airflow-webserver | apache/airflow:2.9.1 | 8080 | Airflow UI |
-| mlflow | ghcr.io/mlflow/mlflow:v3.11.1 | 5000 | Model registry + tracking |
+| mlflow | ghcr.io/mlflow/mlflow:v3.11.1 | 5000 | Model registry + experiment tracking |
 | backend | mlops-review-pulse-backend | 8000 | FastAPI inference server |
 | frontend | mlops-review-pulse-frontend | 3002 | Nginx static dashboard |
 | prometheus | prom/prometheus:latest | 9090 | Metrics scraping |
 | grafana | grafana/grafana:latest | 3001 | Metrics visualization |
+
+**Note on MLflow v3:** The server is started with `--allowed-hosts mlflow,localhost,127.0.0.1,backend` to permit internal Docker service-name requests. Without this flag, MLflow v3's security middleware rejects calls from the backend container with "Invalid Host header".

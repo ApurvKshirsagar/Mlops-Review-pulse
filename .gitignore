@@ -1,31 +1,68 @@
-# Python
-venv/
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Environment secrets ───────────────────────────────────
 .env
 
-# Airflow runtime
+# ── Logs — written to host-mounted volume, not in repo ────────────────────────
+*.log
+logs/
 airflow/logs/
-airflow/*.db
-airflow/airflow.cfg
 
-# Data files (managed by DVC - ignore actual data, not .dvc pointer files)
-airflow/data/raw/sentiment labelled sentences/
+# ── Data files — tracked by DVC, not Git ──────────────────────────────────────
+airflow/data/raw/
 airflow/data/processed/
-!airflow/data/**/*.dvc
-!airflow/data/.gitignore
+*.csv
+*.txt
+!airflow/dags/*.txt   # keep any text fixtures in dags/
 
-# MLflow generated files
+# ── MLflow artifacts ──────────────────────────────────────────────────────────
 mlflow/artifacts/
+mlflow/mlflow.db
 mlflow/*.db
 
-# Generic artifacts outside of data folder
-*.zip
-    
-# OS files
-.DS_Store
-Thumbs.db
+# ── Model files ───────────────────────────────────────────────────────────────
+*.pkl
+*.pt
+*.pth
+*.onnx
 
-# IDE
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── DVC cache (large binary blobs, not for git) ───────────────────────────────
+.dvc/cache/
+.dvc/tmp/
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
+.DS_Store
+__MACOSX/
+Thumbs.db
+*.swp
+*.swo
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
+*.iml
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# (docker-compose.yml IS committed — only ignore override files)
+docker-compose.override.yml

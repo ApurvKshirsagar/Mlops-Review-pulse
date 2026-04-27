@@ -1,4 +1,4 @@
-    # High-Level Design — Review Pulse
+# High-Level Design — Review Pulse
 
 ## 1. Problem Statement
 
@@ -23,24 +23,32 @@ An end-to-end AI web application that:
 **Rationale:** TF-IDF LR is fast (~1.37ms inference), interpretable, and achieves 82.5% F1. DistilBERT achieves 92.6% F1 at the cost of higher inference latency. Both are compared in MLflow to justify the production choice.
 
 ### 3.3 MLflow for Model Registry
-**Decision:** All models registered in MLflow, loaded via `models:/name/Production` URI.
-**Rationale:** Enables zero-downtime model promotion, rollback, and A/B testing without code changes. Decouples model lifecycle from application deployment.
+**Decision:** All models registered in MLflow; the latest version is loaded at startup via `MlflowClient.get_latest_versions()`.
+**Rationale:** Enables zero-downtime model promotion, rollback, and A/B testing without code changes. Decouples model lifecycle from application deployment. Note: MLflow v3 removed named stages (Production/Staging); models are now managed by version number or alias.
 
 ### 3.4 Airflow for Data Pipeline
-**Decision:** Apache Airflow DAG for ingestion → cleaning → validation → baseline stats.
-**Rationale:** Provides visual pipeline monitoring, task retry logic, XCom for inter-task communication, and scheduling capability for future automation.
+**Decision:** Apache Airflow DAG for ingestion → cleaning → validation → baseline stats → drift detection → conditional retraining.
+**Rationale:** Provides visual pipeline monitoring, task retry logic, XCom for inter-task communication, and scheduling capability for future automation. Drift detection is integrated directly into the pipeline so retraining triggers automatically when data distribution shifts.
 
 ### 3.5 DVC for Data Versioning
 **Decision:** DVC tracks raw data files and processed outputs separately from code.
 **Rationale:** Enables full reproducibility — any Git commit can be paired with a DVC commit to reproduce the exact data + model state used in that experiment.
 
 ### 3.6 Docker Compose for Deployment
-**Decision:** All 9 services containerized, orchestrated with Docker Compose.
+**Decision:** All 8 runtime services containerized, orchestrated with Docker Compose. A one-time `airflow-init` service handles DB migration and user creation.
 **Rationale:** Ensures environment parity between development and production. Single `docker compose up -d` boots the entire stack with no manual steps.
 
 ### 3.7 Neutral Class via Confidence Thresholding
 **Decision:** Reviews with max class confidence < 0.65 are labelled "Neutral".
 **Rationale:** The UCI dataset is binary (Positive/Negative only). Real-world reviews are often ambiguous. Confidence thresholding is a pragmatic way to introduce a Neutral class without retraining.
+
+### 3.8 Centralised Logging
+**Decision:** All services write to both stdout and a host-mounted rotating log file at `LOG_DIR=/opt/logs`.
+**Rationale:** Logs must survive container restarts and never be baked into the Docker image. The `app-logs` named volume is mounted into every service that writes logs. Training metrics are additionally written as JSON lines to `training.log` for a permanent audit trail.
+
+### 3.9 Drift Detection and Automated Retraining
+**Decision:** KL-divergence on review-length distribution is computed after every pipeline run. If it exceeds `DRIFT_THRESHOLD`, the training DAG is triggered automatically via the Airflow REST API.
+**Rationale:** Prevents silent model degradation as incoming data distribution shifts over time. Both the threshold and the retraining toggle are configurable via environment variables with no code change required.
 
 ## 4. High-Level Architecture
 
@@ -58,23 +66,24 @@ An end-to-end AI web application that:
 │                   FastAPI Backend                            │
 │    /predict  /predict-batch  /predict-csv  /health           │
 │              Prometheus Instrumentation /metrics             │
-└────────┬──────────────────┬────────────────────────────────┘
+└────────┬──────────────────┬─────────────────────────────────┘
          │                  │
          │ Load Model       │ Scrape Metrics
 ┌────────▼──────┐  ┌────────▼──────────────────────────────┐
-│  MLflow       │  │  Prometheus (:9090) → Grafana (:3001)  │
+│  MLflow v3    │  │  Prometheus (:9090) → Grafana (:3001)  │
 │  Model Reg.   │  │  Request rate, latency, error rate     │
 │  (:5000)      │  └────────────────────────────────────────┘
 └───────────────┘
 
 Data Pipeline:
-┌────────┐    ┌──────────────┐    ┌──────────┐    ┌──────────────┐
-│  UCI   │───▶│ Airflow DAG  │───▶│   DVC    │───▶│   MLflow     │
-│  Data  │    │ 4-task pipe  │    │Versioned │    │  Experiment  │
-└────────┘    └──────────────┘    └──────────┘    └──────────────┘
+┌────────┐    ┌─────────────────────────────────┐    ┌──────────┐    ┌──────────────┐
+│  UCI   │───▶│  Airflow DAG (6 tasks)           │───▶│   DVC    │───▶│   MLflow     │
+│  Data  │    │  ingest→clean→validate→baseline  │    │Versioned │    │  Experiment  │
+└────────┘    │  →detect_drift→trigger_retrain   │    └──────────┘    └──────────────┘
+              └─────────────────────────────────┘
 
-Docker Compose Services:
-postgres | airflow-init | airflow-scheduler | airflow-webserver
+Docker Compose Runtime Services:
+postgres | airflow-scheduler | airflow-webserver
 mlflow | backend | frontend | prometheus | grafana
 ```
 
@@ -96,3 +105,5 @@ mlflow | backend | frontend | prometheus | grafana
 | Deployment | Single command | `docker compose up -d` |
 | Test coverage | > 7 test cases | 7 passing, 0 failing |
 | Monitoring | Real-time metrics | Prometheus + Grafana live dashboard |
+| Log persistence | Survive container restarts | Host-mounted `app-logs` volume |
+| Drift detection | Automatic trigger on shift | KL-divergence with configurable threshold |

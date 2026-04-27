@@ -1,110 +1,147 @@
-version: '3.8'
-
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.1
+  env_file: .env
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: "scipy python-dotenv"
+    LOG_DIR: /opt/logs
+    PROCESSED_DIR: ${PROCESSED_DIR}
+    RAW_DIR: ${RAW_DIR}
+    MLFLOW_URI: ${MLFLOW_URI}
+    DRIFT_THRESHOLD: ${DRIFT_THRESHOLD}
+    RETRAIN_ON_DRIFT: ${RETRAIN_ON_DRIFT}
+    AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/data:/opt/airflow/data
     - ./mlflow:/opt/mlflow
+    - app-logs:/opt/logs
   depends_on:
     postgres:
       condition: service_healthy
   networks:
     - review-pulse-net
 
+
 services:
 
-  # ── Database ──────────────────────────────────────────────
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
   postgres:
     image: postgres:13
+    env_file: .env
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       interval: 5s
+      timeout: 5s
       retries: 5
     networks:
       - review-pulse-net
 
-  # ── Airflow ───────────────────────────────────────────────
+  # ── Airflow init ──────────────────────────────────────────────────────────
   airflow-init:
     <<: *airflow-common
-    command: bash -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@reviewpulse.com"
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username ${AIRFLOW_ADMIN_USER}
+          --password ${AIRFLOW_ADMIN_PASSWORD}
+          --firstname Admin
+          --lastname   User
+          --role       Admin
+          --email      admin@reviewpulse.com
+      "
     restart: "no"
 
+  # ── Airflow scheduler ─────────────────────────────────────────────────────
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
 
+  # ── Airflow webserver — http://localhost:8080 ─────────────────────────────
   airflow-webserver:
     <<: *airflow-common
     command: webserver
     ports:
       - "8080:8080"
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
 
-  # ── MLflow ────────────────────────────────────────────────
+  # ── MLflow — http://localhost:5000 ────────────────────────────────────────
+  # Uses the official image with mlflow pre-installed (no pip install at startup).
+  # Healthcheck uses python -c instead of wget/curl since availability varies.
+  # MLflow v3 does not have a /health endpoint — we check the root page instead.
   mlflow:
     image: ghcr.io/mlflow/mlflow:v3.11.1
-    command: >
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --backend-store-uri sqlite:////opt/mlflow/mlflow.db
-      --default-artifact-root /opt/mlflow/artifacts
+    entrypoint: []
+    command:
+      - bash
+      - -c
+      - |
+        mkdir -p /opt/mlflow/artifacts &&
+        mlflow server \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --backend-store-uri sqlite:////opt/mlflow/mlflow.db \
+          --default-artifact-root /opt/mlflow/artifacts
     ports:
       - "5000:5000"
     volumes:
       - ./mlflow:/opt/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - review-pulse-net
 
-  # ── Backend API ───────────────────────────────────────────
+  # ── Backend — http://localhost:8000 ──────────────────────────────────────
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
+    env_file: .env
     environment:
-      MLFLOW_URI: http://mlflow:5000
-      MODEL_NAME: sentiment-tfidf-lr
-      MODEL_STAGE: Production
+      MLFLOW_URI:    http://mlflow:5000
+      MODEL_NAME:    ${MODEL_NAME}
+      MODEL_STAGE:   ${MODEL_STAGE}
       PROCESSED_DIR: /opt/airflow/data/processed
-      PYTHONPATH: /app
+      LOG_DIR:       /opt/logs
+      PYTHONPATH:    /app
     volumes:
       - ./mlflow:/opt/mlflow
       - ./airflow/data:/opt/airflow/data
+      - app-logs:/opt/logs
     depends_on:
-      - mlflow
-    networks:
-      - review-pulse-net
+      mlflow:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 20s
+    networks:
+      - review-pulse-net
 
-  # ── Frontend ──────────────────────────────────────────────
+  # ── Frontend — http://localhost:3002 ─────────────────────────────────────
   frontend:
     build:
       context: frontend
@@ -116,7 +153,7 @@ services:
     networks:
       - review-pulse-net
 
-  # ── Monitoring ────────────────────────────────────────────
+  # ── Prometheus — http://localhost:9090 ───────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -130,24 +167,29 @@ services:
     networks:
       - review-pulse-net
 
+  # ── Grafana — http://localhost:3001 ──────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     ports:
       - "3001:3000"
+    env_file: .env
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_SECURITY_ADMIN_USER:     ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP:     'false'
     volumes:
       - ./monitoring/grafana:/etc/grafana/provisioning/datasources
       - grafana-data:/var/lib/grafana
     networks:
       - review-pulse-net
 
+
 networks:
   review-pulse-net:
     driver: bridge
 
+
 volumes:
   postgres-data:
   grafana-data:
+  app-logs:
