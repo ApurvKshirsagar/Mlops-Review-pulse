@@ -1,6 +1,6 @@
 stages:
   ingest:
-    cmd: docker exec airflow-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline ingest_data 2024-01-01
+    cmd: docker exec mlops-review-pulse-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline ingest_data 2024-01-01
     deps:
       - airflow/data/raw/sentiment labelled sentences/amazon_cells_labelled.txt
       - airflow/data/raw/sentiment labelled sentences/imdb_labelled.txt
@@ -9,19 +9,19 @@ stages:
       - airflow/data/processed/raw_combined.csv
 
   clean:
-    cmd: docker exec airflow-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline clean_data 2024-01-01
+    cmd: docker exec mlops-review-pulse-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline clean_data 2024-01-01
     deps:
       - airflow/data/processed/raw_combined.csv
     outs:
       - airflow/data/processed/cleaned.csv
 
   validate:
-    cmd: docker exec airflow-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline validate_data 2024-01-01
+    cmd: docker exec mlops-review-pulse-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline validate_data 2024-01-01
     deps:
       - airflow/data/processed/cleaned.csv
 
   baseline_stats:
-    cmd: docker exec airflow-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline compute_baseline_stats 2024-01-01
+    cmd: docker exec mlops-review-pulse-airflow-scheduler-1 airflow tasks test review_ingestion_pipeline compute_baseline_stats 2024-01-01
     deps:
       - airflow/data/processed/cleaned.csv
     outs:
