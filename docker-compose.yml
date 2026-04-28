@@ -26,7 +26,7 @@ x-airflow-common: &airflow-common
     ALERT_EMAIL_TO:         ${ALERT_EMAIL_TO}
     DRY_PIPELINE_HOURS:     ${DRY_PIPELINE_HOURS:-12}
     PROMETHEUS_PUSHGATEWAY: ${PROMETHEUS_PUSHGATEWAY:-http://pushgateway:9091}
-    _PIP_ADDITIONAL_REQUIREMENTS: "scipy python-dotenv requests"
+    _PIP_ADDITIONAL_REQUIREMENTS: "scipy python-dotenv requests scikit-learn mlflow"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs

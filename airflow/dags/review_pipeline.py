@@ -14,7 +14,7 @@ from scipy.stats import entropy
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.email import send_email
+import airflow.utils.email as _airflow_email_mod
 
 load_dotenv()
 
@@ -37,7 +37,7 @@ def _send_alert_email(subject: str, body: str) -> None:
         logger.warning("ALERT_EMAIL_TO not set — skipping email notification")
         return
     try:
-        send_email(to=ALERT_EMAIL, subject=subject, html_content=f"<pre>{body}</pre>")
+        _airflow_email_mod.send_email(to=ALERT_EMAIL, subject=subject, html_content=f"<pre>{body}</pre>")
         logger.info(f"Alert email sent to {ALERT_EMAIL}: {subject}")
     except Exception:
         logger.error("Failed to send alert email:\n" + traceback.format_exc())
@@ -238,20 +238,17 @@ def detect_drift(**context):
         raise
 
 
+# AFTER
 def train_model(**context):
     """
-    Task 7 — Train (or retrain) the sentiment model directly in the pipeline.
-
-    Always runs so the first pipeline run produces a deployable model.
-    On subsequent runs it only retrains when drift was detected (controlled
-    by RETRAIN_ON_DRIFT env var). This keeps the pipeline idempotent and
-    avoids unnecessary MLflow runs when data hasn't changed.
+    Task 6 — Train (or retrain) the sentiment model directly in the pipeline.
+    All training logic is inlined to avoid importing the backend package,
+    which is not installed inside the Airflow container.
     """
     try:
         drift_detected = context["ti"].xcom_pull(key="drift_detected", task_ids="detect_drift")
-        is_first_run   = drift_detected is None   # baseline_stats didn't exist yet
+        is_first_run   = drift_detected is None
 
-        # Skip retraining if no drift and this isn't the first run
         if not is_first_run and not drift_detected and not RETRAIN_ON_DRIFT:
             logger.info("No drift detected and RETRAIN_ON_DRIFT=false — skipping training")
             return
@@ -261,48 +258,90 @@ def train_model(**context):
         else:
             logger.info("First pipeline run — training initial model")
 
-        # Add the app root to sys.path so we can import backend modules
-        app_root = os.environ.get("APP_ROOT", "/app")
-        if app_root not in sys.path:
-            sys.path.insert(0, app_root)
+        import pickle
+        import mlflow
+        import mlflow.sklearn
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+        from sklearn.model_selection import train_test_split
+        from sklearn.pipeline import Pipeline
 
-        from backend.app.services.train import load_data, train_tfidf_lr, compare_and_register_best
+        processed_dir = os.environ.get("PROCESSED_DIR", "/opt/airflow/data/processed")
+        model_dir     = os.environ.get("MODEL_DIR",     "/opt/mlflow/artifacts/models")
+        mlflow_uri    = os.environ.get("MLFLOW_URI",    "http://mlflow:5000")
+        os.makedirs(model_dir, exist_ok=True)
 
-        df = load_data()
-        lr_run_id, lr_metrics = train_tfidf_lr(df)
+        df = pd.read_csv(os.path.join(processed_dir, "cleaned.csv"))
+        df = df.dropna(subset=["review", "sentiment"])
+        logger.info(f"Loaded {len(df)} rows for training")
 
-        logger.info(
-            f"Training complete — "
-            f"accuracy={lr_metrics.get('accuracy', 'N/A'):.4f}, "
-            f"f1={lr_metrics.get('f1_macro', 'N/A'):.4f}, "
-            f"run_id={lr_run_id}"
+        X = df["review"].astype(str)
+        y = df["sentiment"]
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
         )
 
-        # Push training metrics to Prometheus
-        _push_metric("review_pulse_model_accuracy", lr_metrics.get("accuracy", 0))
-        _push_metric("review_pulse_model_f1",       lr_metrics.get("f1_macro", 0))
+        pipeline = Pipeline([
+            ("tfidf", TfidfVectorizer(max_features=10000, ngram_range=(1, 2), min_df=2)),
+            ("lr",    LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")),
+        ])
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
 
-        # Email confirmation
+        metrics = {
+            "accuracy":   round(accuracy_score(y_test, y_pred), 4),
+            "f1_macro":   round(f1_score(y_test, y_pred, average="macro"), 4),
+            "precision":  round(precision_score(y_test, y_pred, average="macro"), 4),
+            "recall":     round(recall_score(y_test, y_pred, average="macro"), 4),
+            "test_size":  len(X_test),
+            "train_size": len(X_train),
+        }
+        logger.info(f"Training metrics: {metrics}")
+
+        mlflow.set_tracking_uri(mlflow_uri)
+        mlflow.set_experiment("sentiment-analysis")
+        with mlflow.start_run(run_name="tfidf-logistic-regression"):
+            mlflow.log_params({
+                "max_features": 10000, "ngram_range": "1,2", "min_df": 2,
+                "C": 1.0, "max_iter": 1000, "solver": "lbfgs",
+            })
+            mlflow.log_metrics(metrics)
+            mlflow.sklearn.log_model(
+                pipeline,
+                artifact_path="tfidf-lr-model",
+                registered_model_name="sentiment-tfidf-lr",
+            )
+            run_id = mlflow.active_run().info.run_id
+
+        model_path = os.path.join(model_dir, "tfidf_lr_pipeline.pkl")
+        with open(model_path, "wb") as f:
+            pickle.dump(pipeline, f)
+        logger.info(f"Pickle saved to {model_path}")
+
+        logger.info(f"Training complete — accuracy={metrics['accuracy']:.4f}, "
+                    f"f1={metrics['f1_macro']:.4f}, run_id={run_id}")
+
+        _push_metric("review_pulse_model_accuracy", metrics["accuracy"])
+        _push_metric("review_pulse_model_f1",       metrics["f1_macro"])
+
         kl = context["ti"].xcom_pull(key="kl_divergence", task_ids="detect_drift") or 0.0
         _send_alert_email(
             subject="[ReviewPulse] ✅ Model Training Complete",
             body=(
                 f"Model successfully trained and registered.\n\n"
-                f"Accuracy      : {lr_metrics.get('accuracy', 'N/A'):.4f}\n"
-                f"F1 (macro)    : {lr_metrics.get('f1_macro', 'N/A'):.4f}\n"
-                f"MLflow run ID : {lr_run_id}\n"
+                f"Accuracy      : {metrics['accuracy']:.4f}\n"
+                f"F1 (macro)    : {metrics['f1_macro']:.4f}\n"
+                f"MLflow run ID : {run_id}\n"
                 f"KL-divergence : {kl:.4f}\n"
-                f"Time          : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-                f"MLflow: http://localhost:5000\n"
+                f"Time          : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             ),
         )
-
-        context["ti"].xcom_push(key="training_run_id", value=lr_run_id)
+        context["ti"].xcom_push(key="training_run_id", value=run_id)
 
     except Exception:
         logger.error("train_model failed:\n" + traceback.format_exc())
         raise
-
 
 # ── DAG definition ────────────────────────────────────────────────────────────
 

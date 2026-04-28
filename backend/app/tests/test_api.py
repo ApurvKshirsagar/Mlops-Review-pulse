@@ -39,9 +39,9 @@ def _inject_model(request):
     if request.node.get_closest_marker("no_model_mock"):
         yield
         return
-    with patch("backend.app.api.routes.get_model", return_value=_mock_model):
+    with patch("backend.app.api.routes.get_model", return_value=_mock_model), \
+         patch("backend.app.services.predictor.get_model", return_value=_mock_model):
         yield
-
 
 # ── DAG loader — avoids importing Airflow on Windows ─────────────────────────
 _DAG_PATH = os.path.abspath(
@@ -109,7 +109,7 @@ def test_predict_negative_review():
     neg_model = MagicMock()
     neg_model.predict_proba.return_value = [[0.90, 0.10]]
     neg_model.classes_ = ["Negative", "Positive"]
-    with patch("backend.app.api.routes.get_model", return_value=neg_model):
+    with patch("backend.app.api.routes.get_model", return_value=neg_model), patch("backend.app.services.predictor.get_model", return_value=neg_model):
         r = client.post("/api/v1/predict", json={"review": "Worst purchase ever, total waste of money"})
     assert r.status_code == 200
     assert r.json()["sentiment"] in ["Negative", "Neutral"]
