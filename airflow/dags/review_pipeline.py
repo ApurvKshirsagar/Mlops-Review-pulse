@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import sys
+import time
 import traceback
 from datetime import datetime, timedelta
 
@@ -12,31 +14,81 @@ from scipy.stats import entropy
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.utils.email import send_email
 
-# Load .env for local testing; no-op when vars are already in the environment
 load_dotenv()
 
-# ── Config — read from environment / .env ────────────────────────────────────
-RAW_DIR         = os.environ.get("RAW_DIR",         "/opt/airflow/data/raw")
-PROCESSED_DIR   = os.environ.get("PROCESSED_DIR",   "/opt/airflow/data/processed")
-DRIFT_THRESHOLD = float(os.environ.get("DRIFT_THRESHOLD", "0.1"))
-RETRAIN_ON_DRIFT = os.environ.get("RETRAIN_ON_DRIFT", "true").lower() == "true"
-AIRFLOW_USER    = os.environ.get("AIRFLOW_ADMIN_USER",     "admin")
-AIRFLOW_PASS    = os.environ.get("AIRFLOW_ADMIN_PASSWORD",  "admin")
+RAW_DIR          = os.environ.get("RAW_DIR",           "/opt/airflow/data/raw")
+PROCESSED_DIR    = os.environ.get("PROCESSED_DIR",     "/opt/airflow/data/processed")
+DRIFT_THRESHOLD  = float(os.environ.get("DRIFT_THRESHOLD", "0.1"))
+RETRAIN_ON_DRIFT = os.environ.get("RETRAIN_ON_DRIFT",  "true").lower() == "true"
+AIRFLOW_USER     = os.environ.get("AIRFLOW_ADMIN_USER",     "admin")
+AIRFLOW_PASS     = os.environ.get("AIRFLOW_ADMIN_PASSWORD",  "admin")
+ALERT_EMAIL      = os.environ.get("ALERT_EMAIL_TO",    "")
+PROMETHEUS_PUSHGATEWAY = os.environ.get("PROMETHEUS_PUSHGATEWAY", "http://pushgateway:9091")
 
-# Module-level logger — Airflow captures this in task logs
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 1 — Ingest raw data from multiple sources and merge into one CSV
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _send_alert_email(subject: str, body: str) -> None:
+    if not ALERT_EMAIL:
+        logger.warning("ALERT_EMAIL_TO not set — skipping email notification")
+        return
+    try:
+        send_email(to=ALERT_EMAIL, subject=subject, html_content=f"<pre>{body}</pre>")
+        logger.info(f"Alert email sent to {ALERT_EMAIL}: {subject}")
+    except Exception:
+        logger.error("Failed to send alert email:\n" + traceback.format_exc())
+
+
+def _push_metric(metric_name: str, value: float, labels: dict = None) -> None:
+    try:
+        label_str = ""
+        if labels:
+            label_str = "/" + "/".join(f"{k}/{v}" for k, v in labels.items())
+        url = f"{PROMETHEUS_PUSHGATEWAY}/metrics/job/airflow_pipeline{label_str}"
+        payload = f"# TYPE {metric_name} gauge\n{metric_name} {value}\n"
+        resp = requests.post(url, data=payload, timeout=5)
+        if resp.ok:
+            logger.info(f"Pushed metric {metric_name}={value} to Pushgateway")
+        else:
+            logger.warning(f"Pushgateway push failed: {resp.status_code} {resp.text}")
+    except Exception:
+        logger.warning("Could not push metric to Pushgateway (non-fatal):\n" + traceback.format_exc())
+
+
+# ── DAG callbacks ─────────────────────────────────────────────────────────────
+
+def on_failure_callback(context):
+    dag_id  = context.get("dag").dag_id
+    task_id = context.get("task_instance").task_id
+    log_url = context.get("task_instance").log_url
+    exc     = context.get("exception", "Unknown error")
+    subject = f"[ReviewPulse] ❌ Task Failed: {dag_id}.{task_id}"
+    body = (
+        f"DAG:   {dag_id}\n"
+        f"Task:  {task_id}\n"
+        f"Time:  {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"Error: {exc}\n\n"
+        f"Logs:  {log_url}\n"
+    )
+    _send_alert_email(subject, body)
+    _push_metric("review_pulse_dag_last_run_failed", 1, {"dag": dag_id, "task": task_id})
+
+
+def on_success_callback(context):
+    dag_id = context.get("dag").dag_id
+    _push_metric("review_pulse_dag_last_run_failed",       0,           {"dag": dag_id})
+    _push_metric("review_pulse_dag_last_success_timestamp", time.time(), {"dag": dag_id})
+
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+
 def ingest_data(**context):
-    """
-    Read the three UCI sentiment files, tag each row with its source,
-    and save a combined raw CSV to PROCESSED_DIR/raw_combined.csv.
-    Row count is pushed to XCom so downstream tasks can see it.
-    """
+    """Read UCI sentiment files, merge, and write raw_combined.csv.
+    Also performs the Dry Pipeline check."""
     try:
         files = {
             "amazon": os.path.join(RAW_DIR, "sentiment labelled sentences/amazon_cells_labelled.txt"),
@@ -44,9 +96,29 @@ def ingest_data(**context):
             "yelp":   os.path.join(RAW_DIR, "sentiment labelled sentences/yelp_labelled.txt"),
         }
 
+        DRY_PIPELINE_HOURS = float(os.environ.get("DRY_PIPELINE_HOURS", "12"))
+        stale_files = []
+        for source, path in files.items():
+            if not os.path.exists(path):
+                stale_files.append(f"{source}: FILE MISSING ({path})")
+            else:
+                age_hours = (time.time() - os.path.getmtime(path)) / 3600
+                if age_hours > DRY_PIPELINE_HOURS:
+                    stale_files.append(f"{source}: last modified {age_hours:.1f}h ago")
+
+        if stale_files:
+            _send_alert_email(
+                subject="[ReviewPulse] ⚠️ Dry Pipeline — No fresh data detected",
+                body=(
+                    f"No new data files detected within the {DRY_PIPELINE_HOURS}-hour window.\n\n"
+                    + "\n".join(f"  • {s}" for s in stale_files)
+                    + f"\n\nCheck: {RAW_DIR}\nAirflow: http://localhost:8080"
+                ),
+            )
+            logger.warning(f"Dry pipeline detected: {stale_files}")
+
         frames = []
         for source, path in files.items():
-            # Files are tab-separated with no header: <review>\t<label>
             df = pd.read_csv(path, sep="\t", header=None, names=["review", "label"])
             df["source"] = source
             frames.append(df)
@@ -54,82 +126,41 @@ def ingest_data(**context):
 
         combined = pd.concat(frames, ignore_index=True)
         os.makedirs(PROCESSED_DIR, exist_ok=True)
-
-        raw_path = os.path.join(PROCESSED_DIR, "raw_combined.csv")
-        combined.to_csv(raw_path, index=False)
-
-        logger.info(f"Ingestion complete — {len(combined)} total rows saved to {raw_path}")
+        combined.to_csv(os.path.join(PROCESSED_DIR, "raw_combined.csv"), index=False)
+        logger.info(f"Ingestion complete — {len(combined)} rows")
         context["ti"].xcom_push(key="row_count", value=len(combined))
 
     except Exception:
         logger.error("ingest_data failed:\n" + traceback.format_exc())
-        raise  # re-raise so Airflow marks this task as FAILED
+        raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 2 — Clean and normalise text; add human-readable sentiment column
-# ─────────────────────────────────────────────────────────────────────────────
 def clean_data(**context):
-    """
-    Apply standard NLP pre-processing:
-      - lowercase
-      - strip HTML tags
-      - remove non-alphanumeric characters
-      - drop nulls and duplicates
-    Saves result to PROCESSED_DIR/cleaned.csv.
-    """
     try:
-        raw_path   = os.path.join(PROCESSED_DIR, "raw_combined.csv")
-        clean_path = os.path.join(PROCESSED_DIR, "cleaned.csv")
-
-        df = pd.read_csv(raw_path)
+        df = pd.read_csv(os.path.join(PROCESSED_DIR, "raw_combined.csv"))
         before = len(df)
-
         df["review"] = df["review"].str.lower()
-        df["review"] = df["review"].str.replace(r"<.*?>", "", regex=True)        # remove HTML
-        df["review"] = df["review"].str.replace(r"[^a-z0-9\s]", "", regex=True) # remove punctuation
+        df["review"] = df["review"].str.replace(r"<.*?>", "", regex=True)
+        df["review"] = df["review"].str.replace(r"[^a-z0-9\s]", "", regex=True)
         df["review"] = df["review"].str.strip()
-
         df.dropna(subset=["review"], inplace=True)
         df.drop_duplicates(subset=["review"], inplace=True)
-
-        logger.info(f"Dropped {before - len(df)} null/duplicate rows")
-
-        # Map numeric labels to human-readable strings
         df["sentiment"] = df["label"].map({0: "Negative", 1: "Positive"})
-        df.to_csv(clean_path, index=False)
-
-        logger.info(f"Cleaned data saved — {len(df)} rows → {clean_path}")
-
+        df.to_csv(os.path.join(PROCESSED_DIR, "cleaned.csv"), index=False)
+        logger.info(f"Cleaned: {before} → {len(df)} rows")
     except Exception:
         logger.error("clean_data failed:\n" + traceback.format_exc())
         raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 3 — Schema and quality validation
-# ─────────────────────────────────────────────────────────────────────────────
 def validate_data(**context):
-    """
-    Assert minimum data-quality requirements before training proceeds.
-    Raises AssertionError (which Airflow treats as a task failure) on any violation.
-    """
     try:
-        clean_path = os.path.join(PROCESSED_DIR, "cleaned.csv")
-        df = pd.read_csv(clean_path)
-
-        required_cols = {"review", "label", "sentiment", "source"}
-        assert required_cols.issubset(df.columns), \
-            f"Missing columns: {required_cols - set(df.columns)}"
-
-        assert df["review"].isnull().sum() == 0,    "Null values found in 'review' column"
-        assert df["sentiment"].isnull().sum() == 0, "Null values found in 'sentiment' column"
-        assert len(df) >= 2000, f"Dataset too small: {len(df)} rows (minimum 2000)"
-
-        dist = df["sentiment"].value_counts(normalize=True)
-        logger.info(f"Label distribution (normalised):\n{dist}")
-        logger.info("Validation passed ✓")
-
+        df = pd.read_csv(os.path.join(PROCESSED_DIR, "cleaned.csv"))
+        assert {"review", "label", "sentiment", "source"}.issubset(df.columns)
+        assert df["review"].isnull().sum() == 0
+        assert df["sentiment"].isnull().sum() == 0
+        assert len(df) >= 2000, f"Dataset too small: {len(df)} rows"
+        logger.info(f"Validation passed ✓  rows={len(df)}")
     except AssertionError as exc:
         logger.error(f"Validation failed: {exc}")
         raise
@@ -138,22 +169,10 @@ def validate_data(**context):
         raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 4 — Compute and save baseline statistics for drift detection
-# ─────────────────────────────────────────────────────────────────────────────
 def compute_baseline_stats(**context):
-    """
-    Compute review-length statistics and class distribution.
-    Saves to PROCESSED_DIR/baseline_stats.json.
-    These stats are used by the detect_drift task to measure future data drift.
-    """
     try:
-        clean_path = os.path.join(PROCESSED_DIR, "cleaned.csv")
-        df = pd.read_csv(clean_path)
-
-        # Word count per review (used as the drift-detection signal)
+        df = pd.read_csv(os.path.join(PROCESSED_DIR, "cleaned.csv"))
         df["review_length"] = df["review"].apply(lambda x: len(str(x).split()))
-
         stats = {
             "mean_review_length": round(df["review_length"].mean(), 2),
             "std_review_length":  round(df["review_length"].std(), 2),
@@ -163,75 +182,53 @@ def compute_baseline_stats(**context):
             "label_distribution": df["sentiment"].value_counts().to_dict(),
             "computed_at":        datetime.utcnow().isoformat(),
         }
-
-        stats_path = os.path.join(PROCESSED_DIR, "baseline_stats.json")
-        with open(stats_path, "w") as f:
+        with open(os.path.join(PROCESSED_DIR, "baseline_stats.json"), "w") as f:
             json.dump(stats, f, indent=2)
-
-        logger.info(f"Baseline stats saved to {stats_path}: {stats}")
-
+        logger.info(f"Baseline stats saved: {stats}")
     except Exception:
         logger.error("compute_baseline_stats failed:\n" + traceback.format_exc())
         raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 5 — Detect data drift using KL-divergence
-# ─────────────────────────────────────────────────────────────────────────────
 def detect_drift(**context):
-    """
-    Compare the current batch's review-length distribution to the saved baseline
-    using KL-divergence. Pushes 'drift_detected' (bool) to XCom.
-
-    KL-divergence measures how much the current distribution has shifted from
-    the reference (baseline). A value of 0 means identical distributions;
-    higher values indicate more drift. DRIFT_THRESHOLD controls sensitivity.
-    """
     try:
         baseline_path = os.path.join(PROCESSED_DIR, "baseline_stats.json")
-        cleaned_path  = os.path.join(PROCESSED_DIR, "cleaned.csv")
-
         if not os.path.exists(baseline_path):
-            logger.warning("No baseline_stats.json found — skipping drift check")
+            logger.warning("No baseline_stats.json — skipping drift check")
             context["ti"].xcom_push(key="drift_detected", value=False)
             return
 
         with open(baseline_path) as f:
             baseline = json.load(f)
 
-        df = pd.read_csv(cleaned_path)
+        df = pd.read_csv(os.path.join(PROCESSED_DIR, "cleaned.csv"))
         df["review_length"] = df["review"].apply(lambda x: len(str(x).split()))
 
-        # Build matching histograms (0–100 words, 20 equal-width bins)
         bins = np.linspace(0, 100, 21)
-
-        # Approximate the baseline distribution from its stored summary stats
         baseline_lengths = np.random.normal(
             loc=baseline["mean_review_length"],
-            scale=max(baseline["std_review_length"], 0.1),  # avoid 0 std
+            scale=max(baseline["std_review_length"], 0.1),
             size=5000,
         )
-        p, _ = np.histogram(baseline_lengths,       bins=bins, density=True)
-        q, _ = np.histogram(df["review_length"],    bins=bins, density=True)
-
-        # Add small epsilon to avoid log(0) in KL-divergence calculation
-        p = p + 1e-10
-        q = q + 1e-10
-
-        kl_div = float(entropy(p, q))
+        p, _ = np.histogram(baseline_lengths,    bins=bins, density=True)
+        q, _ = np.histogram(df["review_length"], bins=bins, density=True)
+        kl_div = float(entropy(p + 1e-10, q + 1e-10))
         drift_detected = kl_div > DRIFT_THRESHOLD
 
-        logger.info(
-            f"Drift check — KL-divergence={kl_div:.4f}, "
-            f"threshold={DRIFT_THRESHOLD}, drift_detected={drift_detected}"
-        )
+        logger.info(f"Drift — KL={kl_div:.4f}, threshold={DRIFT_THRESHOLD}, detected={drift_detected}")
+        _push_metric("review_pulse_data_drift_kl_divergence", kl_div)
+
         if drift_detected:
-            logger.warning(
-                f"DATA DRIFT DETECTED — KL={kl_div:.4f} exceeds threshold {DRIFT_THRESHOLD}. "
-                f"Model retraining will be triggered."
+            _send_alert_email(
+                subject="[ReviewPulse] ⚠️ Data Drift Detected",
+                body=(
+                    f"Data drift detected.\n\n"
+                    f"KL-divergence : {kl_div:.4f}\n"
+                    f"Threshold     : {DRIFT_THRESHOLD}\n"
+                    f"Time          : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                    f"Model will be retrained in the next task."
+                ),
             )
-        else:
-            logger.info("No significant drift — model retraining not required")
 
         context["ti"].xcom_push(key="drift_detected", value=drift_detected)
         context["ti"].xcom_push(key="kl_divergence",  value=kl_div)
@@ -241,71 +238,94 @@ def detect_drift(**context):
         raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 6 — Conditionally trigger model retraining
-# ─────────────────────────────────────────────────────────────────────────────
-def trigger_retraining(**context):
+def train_model(**context):
     """
-    Read the 'drift_detected' flag from XCom (set by detect_drift).
-    If drift is detected AND RETRAIN_ON_DRIFT=true, call the Airflow REST API
-    to trigger the model_training_pipeline DAG.
-    If RETRAIN_ON_DRIFT=false, only logs a warning so a human can decide.
+    Task 7 — Train (or retrain) the sentiment model directly in the pipeline.
+
+    Always runs so the first pipeline run produces a deployable model.
+    On subsequent runs it only retrains when drift was detected (controlled
+    by RETRAIN_ON_DRIFT env var). This keeps the pipeline idempotent and
+    avoids unnecessary MLflow runs when data hasn't changed.
     """
     try:
-        drift = context["ti"].xcom_pull(key="drift_detected", task_ids="detect_drift")
+        drift_detected = context["ti"].xcom_pull(key="drift_detected", task_ids="detect_drift")
+        is_first_run   = drift_detected is None   # baseline_stats didn't exist yet
 
-        if not drift:
-            logger.info("No drift detected — skipping retraining")
+        # Skip retraining if no drift and this isn't the first run
+        if not is_first_run and not drift_detected and not RETRAIN_ON_DRIFT:
+            logger.info("No drift detected and RETRAIN_ON_DRIFT=false — skipping training")
             return
 
-        if not RETRAIN_ON_DRIFT:
-            logger.warning(
-                "Drift detected but RETRAIN_ON_DRIFT=false — "
-                "manual retraining required"
-            )
-            return
+        if drift_detected:
+            logger.info("Drift detected — retraining model")
+        else:
+            logger.info("First pipeline run — training initial model")
 
-        logger.info("Triggering model_training_pipeline DAG via Airflow REST API...")
+        # Add the app root to sys.path so we can import backend modules
+        app_root = os.environ.get("APP_ROOT", "/app")
+        if app_root not in sys.path:
+            sys.path.insert(0, app_root)
 
-        # POST to the Airflow REST API to trigger the training DAG
-        response = requests.post(
-            "http://airflow-webserver:8080/api/v1/dags/model_training_pipeline/dagRuns",
-            json={"conf": {"triggered_by": "drift_detection"}},
-            auth=(AIRFLOW_USER, AIRFLOW_PASS),
-            timeout=10,
+        from backend.app.services.train import load_data, train_tfidf_lr, compare_and_register_best
+
+        df = load_data()
+        lr_run_id, lr_metrics = train_tfidf_lr(df)
+
+        logger.info(
+            f"Training complete — "
+            f"accuracy={lr_metrics.get('accuracy', 'N/A'):.4f}, "
+            f"f1={lr_metrics.get('f1_macro', 'N/A'):.4f}, "
+            f"run_id={lr_run_id}"
         )
 
-        if response.ok:
-            logger.info(f"Retraining DAG triggered successfully: {response.json()}")
-        else:
-            logger.error(
-                f"Failed to trigger retraining DAG: "
-                f"status={response.status_code} body={response.text}"
-            )
+        # Push training metrics to Prometheus
+        _push_metric("review_pulse_model_accuracy", lr_metrics.get("accuracy", 0))
+        _push_metric("review_pulse_model_f1",       lr_metrics.get("f1_macro", 0))
+
+        # Email confirmation
+        kl = context["ti"].xcom_pull(key="kl_divergence", task_ids="detect_drift") or 0.0
+        _send_alert_email(
+            subject="[ReviewPulse] ✅ Model Training Complete",
+            body=(
+                f"Model successfully trained and registered.\n\n"
+                f"Accuracy      : {lr_metrics.get('accuracy', 'N/A'):.4f}\n"
+                f"F1 (macro)    : {lr_metrics.get('f1_macro', 'N/A'):.4f}\n"
+                f"MLflow run ID : {lr_run_id}\n"
+                f"KL-divergence : {kl:.4f}\n"
+                f"Time          : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                f"MLflow: http://localhost:5000\n"
+            ),
+        )
+
+        context["ti"].xcom_push(key="training_run_id", value=lr_run_id)
 
     except Exception:
-        logger.error("trigger_retraining failed:\n" + traceback.format_exc())
+        logger.error("train_model failed:\n" + traceback.format_exc())
         raise
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DAG definition
-# ─────────────────────────────────────────────────────────────────────────────
+# ── DAG definition ────────────────────────────────────────────────────────────
+
 default_args = {
-    "owner":          "review-pulse",
-    "retries":        1,
-    "retry_delay":    timedelta(minutes=2),
-    "email_on_failure": False,
+    "owner":                     "review-pulse",
+    "retries":                   2,
+    "retry_delay":               timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay":           timedelta(minutes=30),
+    "email_on_failure":          False,
+    "email_on_retry":            False,
 }
 
 with DAG(
     dag_id="review_ingestion_pipeline",
-    description="Ingest, clean, validate, baseline and drift-check UCI review data",
+    description="Ingest → clean → validate → baseline → drift-check → train",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
     schedule_interval="@once",
     catchup=False,
-    tags=["nlp", "ingestion", "review-pulse"],
+    tags=["nlp", "ingestion", "training", "review-pulse"],
+    on_failure_callback=on_failure_callback,
+    on_success_callback=on_success_callback,
 ) as dag:
 
     t1 = PythonOperator(task_id="ingest_data",            python_callable=ingest_data,            provide_context=True)
@@ -313,7 +333,6 @@ with DAG(
     t3 = PythonOperator(task_id="validate_data",          python_callable=validate_data,          provide_context=True)
     t4 = PythonOperator(task_id="compute_baseline_stats", python_callable=compute_baseline_stats, provide_context=True)
     t5 = PythonOperator(task_id="detect_drift",           python_callable=detect_drift,           provide_context=True)
-    t6 = PythonOperator(task_id="trigger_retraining",     python_callable=trigger_retraining,     provide_context=True)
+    t6 = PythonOperator(task_id="train_model",            python_callable=train_model,            provide_context=True)
 
-    # Linear execution order — each task depends on the previous succeeding
     t1 >> t2 >> t3 >> t4 >> t5 >> t6

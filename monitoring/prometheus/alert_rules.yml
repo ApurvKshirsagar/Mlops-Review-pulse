@@ -1,0 +1,182 @@
+groups:
+
+  # ── API Health & Error Rate ────────────────────────────────────────────────
+  - name: api_health
+    rules:
+
+      # Backend is completely unreachable
+      - alert: BackendDown
+        expr: up{job="review-pulse-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: health
+        annotations:
+          summary: "Backend API is down"
+          description: "review-pulse-api has been unreachable for more than 1 minute."
+
+      # High 4xx rate — bad requests / client errors
+      - alert: High4xxRate
+        expr: |
+          sum(rate(http_requests_total{job="review-pulse-api", status=~"4.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="review-pulse-api"}[5m])) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          category: api
+        annotations:
+          summary: "High 4xx error rate on Review Pulse API"
+          description: "More than 10% of requests are returning 4xx over the last 5 minutes."
+
+      # High 5xx rate — server errors (critical)
+      - alert: High5xxRate
+        expr: |
+          sum(rate(http_requests_total{job="review-pulse-api", status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="review-pulse-api"}[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          category: api
+        annotations:
+          summary: "High 5xx server error rate"
+          description: "More than 5% of requests are returning 5xx — the backend may be crashing."
+
+  # ── Inference Latency ─────────────────────────────────────────────────────
+  - name: latency
+    rules:
+
+      # p95 latency spike — inference is slow
+      - alert: HighInferenceLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{
+              job="review-pulse-api", handler="/api/v1/predict"
+            }[5m])) by (le)
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          category: latency
+        annotations:
+          summary: "Inference latency p95 > 2s"
+          description: "95th-percentile prediction latency has exceeded 2 seconds for 5 minutes."
+
+      # p99 latency — really bad
+      - alert: CriticalInferenceLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{
+              job="review-pulse-api", handler="/api/v1/predict"
+            }[5m])) by (le)
+          ) > 5.0
+        for: 3m
+        labels:
+          severity: critical
+          category: latency
+        annotations:
+          summary: "Inference latency p99 > 5s"
+          description: "99th-percentile prediction latency has exceeded 5 seconds — possible model loading issue."
+
+  # ── Resource Usage ────────────────────────────────────────────────────────
+  - name: resources
+    rules:
+
+      # High CPU
+      - alert: HighCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80
+        for: 2m
+        labels:
+          severity: warning
+          category: resource
+        annotations:
+          summary: "CPU usage exceeds 80%"
+          description: "Instance {{ $labels.instance }} CPU has been above 80% for more than 2 minutes."
+
+      # Critical CPU
+      - alert: CriticalCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+          category: resource
+        annotations:
+          summary: "CPU usage exceeds 95% (critical)"
+          description: "Instance {{ $labels.instance }} is at near-full CPU — possible runaway process."
+
+      # High memory
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          category: resource
+        annotations:
+          summary: "Memory usage exceeds 85%"
+          description: "Available memory has dropped below 15% for 5 minutes."
+
+  # ── MLflow ────────────────────────────────────────────────────────────────
+  - name: mlflow
+    rules:
+
+      - alert: MLflowDown
+        expr: up{job="mlflow"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: mlflow
+        annotations:
+          summary: "MLflow tracking server is down"
+          description: "MLflow has been unreachable for more than 2 minutes. Model loading will fail."
+
+  # ── Pipeline / Drift (metrics pushed from Airflow) ────────────────────────
+  - name: pipeline
+    rules:
+
+      # Drift detected gauge pushed by Airflow DAG (value = KL divergence)
+      - alert: DataDriftDetected
+        expr: review_pulse_data_drift_kl_divergence > 0.1
+        for: 0m
+        labels:
+          severity: warning
+          category: pipeline
+        annotations:
+          summary: "Data drift detected in review pipeline"
+          description: "KL-divergence = {{ $value | printf \"%.4f\" }} exceeds threshold 0.1. Retraining may be required."
+
+      # Airflow DAG failed (pushed as a gauge by the DAG's on_failure_callback)
+      - alert: AirflowDAGFailed
+        expr: review_pulse_dag_last_run_failed == 1
+        for: 0m
+        labels:
+          severity: critical
+          category: pipeline
+        annotations:
+          summary: "Airflow DAG failed"
+          description: "The review_pipeline DAG last run ended in failure. Check Airflow logs at http://localhost:8080."
+
+      # No successful DAG run in 13 hours (dry pipeline)
+      - alert: DryPipeline
+        expr: (time() - review_pulse_dag_last_success_timestamp) > 46800
+        for: 0m
+        labels:
+          severity: warning
+          category: pipeline
+        annotations:
+          summary: "Dry pipeline — no successful DAG run in 13 hours"
+          description: "Last successful pipeline run was {{ $value | humanizeDuration }} ago. Check if data files are present."
+
+      # Model not loaded (predictor returns a specific metric when model missing)
+      - alert: ModelNotLoaded
+        expr: review_pulse_model_loaded == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: pipeline
+        annotations:
+          summary: "Prediction model is not loaded"
+          description: "The backend has been running without a loaded model for 2+ minutes. Run training first."

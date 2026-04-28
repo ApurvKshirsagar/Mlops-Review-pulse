@@ -1,0 +1,98 @@
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: '${ALERT_EMAIL_FROM}'
+  smtp_auth_username: '${ALERT_EMAIL_FROM}'
+  smtp_auth_password: '${ALERT_EMAIL_PASSWORD}'   # use Gmail App Password
+  smtp_require_tls: true
+  resolve_timeout: 5m
+
+# ── Routing tree ─────────────────────────────────────────────────────────────
+# All alerts go to the default receiver (your email).
+# Critical alerts bypass grouping and fire immediately.
+route:
+  group_by: ['alertname', 'severity']
+  group_wait:      30s    # wait 30s to batch alerts in the same group
+  group_interval:  5m     # wait 5m before re-sending for a group
+  repeat_interval: 1h     # re-notify if still firing after 1h
+  receiver: email-default
+
+  routes:
+    # Critical alerts fire immediately with no grouping delay
+    - match:
+        severity: critical
+      receiver: email-critical
+      group_wait: 0s
+      repeat_interval: 15m
+
+    # Drift / pipeline alerts get their own receiver
+    - match:
+        category: pipeline
+      receiver: email-pipeline
+      repeat_interval: 30m
+
+# ── Inhibition rules ─────────────────────────────────────────────────────────
+# Suppress warning-level alert if a critical one is already firing for the same job
+inhibit_rules:
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: ['alertname', 'job']
+
+# ── Receivers ────────────────────────────────────────────────────────────────
+receivers:
+
+  - name: email-default
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        subject: '[ReviewPulse][{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert:    {{ .Annotations.summary }}
+          Details:  {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Time:     {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ if .EndsAt }}Resolved: {{ .EndsAt.Format "2006-01-02 15:04:05 UTC" }}{{ end }}
+          {{ end }}
+
+  - name: email-critical
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        subject: '[ReviewPulse][CRITICAL] {{ .GroupLabels.alertname }}'
+        body: |
+          CRITICAL ALERT — immediate attention required.
+
+          {{ range .Alerts }}
+          Alert:    {{ .Annotations.summary }}
+          Details:  {{ .Annotations.description }}
+          Time:     {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ end }}
+
+          Grafana: http://localhost:3001
+          Prometheus: http://localhost:9090
+
+  - name: email-pipeline
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        subject: '[ReviewPulse][Pipeline] {{ .GroupLabels.alertname }}'
+        body: |
+          Pipeline / Data Alert
+
+          {{ range .Alerts }}
+          Alert:    {{ .Annotations.summary }}
+          Details:  {{ .Annotations.description }}
+          Time:     {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ end }}
+
+# ── Silence / maintenance window ─────────────────────────────────────────────
+# To silence alerts during maintenance, use the Alertmanager UI at
+# http://localhost:9093 → Silences → New Silence
+# or the API:
+#   curl -X POST http://localhost:9093/api/v2/silences \
+#     -H 'Content-Type: application/json' \
+#     -d '{"matchers":[{"name":"job","value":"review-pulse-api","isRegex":false}],
+#          "startsAt":"2025-01-01T00:00:00Z","endsAt":"2025-01-01T02:00:00Z",
+#          "createdBy":"admin","comment":"Scheduled maintenance"}'
